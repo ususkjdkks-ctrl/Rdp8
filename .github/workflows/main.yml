@@ -1,0 +1,113 @@
+name: Windows RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    name: Administrator RDP Setup
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          # Disable Network Level Authentication
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall rule for RDP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # Restart RDP service
+          Restart-Service -Name TermService -Force
+
+      - name: Set Administrator Password (20 characters)
+        run: |
+          $upper   = [char[]](65..90)
+          $lower   = [char[]](97..122)
+          $number  = [char[]](48..57)
+          $special = ([char[]](33..47) + [char[]](58..64) + `
+                      [char[]](91..96) + [char[]](123..126))
+
+          $chars = @()
+          $chars += $upper   | Get-Random -Count 5
+          $chars += $lower   | Get-Random -Count 5
+          $chars += $number  | Get-Random -Count 5
+          $chars += $special | Get-Random -Count 5
+
+          $ADMIN_PASSWORD = -join ($chars | Sort-Object { Get-Random })
+
+          net user Administrator "$ADMIN_PASSWORD"
+
+          echo "RDP_USERNAME=Administrator" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$ADMIN_PASSWORD" >> $env:GITHUB_ENV
+
+      - name: Generate Tailscale PIN (4 digits)
+        run: |
+          $PIN = Get-Random -Minimum 1000 -Maximum 9999
+          echo "TAILSCALE_PIN=$PIN" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Remove-Item $msi -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $ip = $null
+          for ($i=0; $i -lt 10; $i++) {
+            $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            if ($ip) { break }
+            Start-Sleep 5
+          }
+
+          if (-not $ip) {
+            Write-Error "Tailscale IP not assigned"
+            exit 1
+          }
+
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Testing RDP on $env:TAILSCALE_IP:3389"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+            Write-Error "RDP port not reachable"
+            exit 1
+          }
+          Write-Host "RDP connectivity successful"
+
+      - name: Maintain Connection (RDP Active)
+        run: |
+          Write-Host "======================================"
+          Write-Host "RDP ACCESS READY (TAILSCALE)"
+          Write-Host "--------------------------------------"
+          Write-Host "IP Address : $env:TAILSCALE_IP"
+          Write-Host "Username   : Administrator"
+          Write-Host "Password   : $env:RDP_PASSWORD"
+          Write-Host "PIN        : $env:TAILSCALE_PIN"
+          Write-Host "Port       : 3389"
+          Write-Host "======================================"
+
+          # Keep runner alive (6 hours)
+          Start-Sleep -Seconds 21600
