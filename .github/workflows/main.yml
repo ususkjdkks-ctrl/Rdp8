@@ -1,11 +1,11 @@
-name: Windows RDP via Tailscale
+name: RDP Setup via Tailscale
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp:
-    name: Administrator RDP Setup
+  rdpsetup:
+    name: rdp setup
     runs-on: windows-latest
 
     steps:
@@ -33,7 +33,7 @@ jobs:
           # Restart RDP service
           Restart-Service -Name TermService -Force
 
-      - name: Set Administrator Password (20 characters)
+      - name: Create RDP User with Secure Password
         run: |
           $upper   = [char[]](65..90)
           $lower   = [char[]](97..122)
@@ -47,12 +47,15 @@ jobs:
           $chars += $number  | Get-Random -Count 5
           $chars += $special | Get-Random -Count 5
 
-          $ADMIN_PASSWORD = -join ($chars | Sort-Object { Get-Random })
+          $RDP_PASSWORD = -join ($chars | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $RDP_PASSWORD -AsPlainText -Force
 
-          net user Administrator "$ADMIN_PASSWORD"
+          New-LocalUser -Name "rdp" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "rdp"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdp"
 
-          echo "RDP_USERNAME=Administrator" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=$ADMIN_PASSWORD" >> $env:GITHUB_ENV
+          echo "RDP_USERNAME=rdp" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$RDP_PASSWORD" >> $env:GITHUB_ENV
 
       - name: Generate Tailscale PIN (4 digits)
         run: |
@@ -63,6 +66,7 @@ jobs:
         run: |
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $msi = "$env:TEMP\tailscale.msi"
+
           Invoke-WebRequest -Uri $url -OutFile $msi
           Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
           Remove-Item $msi -Force
@@ -74,7 +78,7 @@ jobs:
             --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $ip = $null
-          for ($i=0; $i -lt 10; $i++) {
+          for ($i = 0; $i -lt 10; $i++) {
             $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
             if ($ip) { break }
             Start-Sleep 5
@@ -89,10 +93,10 @@ jobs:
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Testing RDP on $env:TAILSCALE_IP:3389"
+          Write-Host "Testing RDP access on $env:TAILSCALE_IP"
           $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $test.TcpTestSucceeded) {
-            Write-Error "RDP port not reachable"
+            Write-Error "RDP port unreachable"
             exit 1
           }
           Write-Host "RDP connectivity successful"
@@ -103,7 +107,7 @@ jobs:
           Write-Host "RDP ACCESS READY (TAILSCALE)"
           Write-Host "--------------------------------------"
           Write-Host "IP Address : $env:TAILSCALE_IP"
-          Write-Host "Username   : Administrator"
+          Write-Host "Username   : rdp"
           Write-Host "Password   : $env:RDP_PASSWORD"
           Write-Host "PIN        : $env:TAILSCALE_PIN"
           Write-Host "Port       : 3389"
